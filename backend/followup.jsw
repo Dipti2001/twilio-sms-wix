@@ -1,0 +1,119 @@
+import wixData from 'wix-data';
+import { sendSms } from 'backend/twilio.jsw';
+
+const clientPhoneNumber = ' '; // Fixed client's phone number
+
+export async function sendFollowUpSms() {
+    console.log(`sendFollowUpSms triggered at ${new Date().toISOString()}`);
+
+    const now = new Date();
+    const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000); // 24 hours ago
+
+    try {
+        const leads = await wixData.query('Leads')
+            .gt('_createdDate', twentyFourHoursAgo) // Leads created in the last 24 hours
+            .eq('status', 'new') // Only check leads with status "new"
+            .find();
+
+        if (leads.items.length > 0) {
+            console.log(`Found ${leads.items.length} new leads for follow-up.`);
+            for (const lead of leads.items) {
+                const clientSms = `Have you called lead ${lead.title}, ${lead.number}? Y/N`;
+
+                console.log(`Sending follow-up SMS to client for lead ${lead.title}`);
+                await sendSmsToClient(clientPhoneNumber, clientSms);
+            }
+        } else {
+            console.log('No new leads found for follow-up.');
+        }
+    } catch (error) {
+        console.error('Error in sendFollowUpSms:', error);
+    }
+}
+
+async function sendSmsToClient(phone, message) {
+    console.log(`Sending SMS to client: ${phone}, Message: ${message}`);
+    return await sendSms("Client", "client@example.com", phone, message);
+}
+
+async function sendSmsToLead(phone, message) {
+    console.log(`Sending SMS to lead: ${phone}, Message: ${message}`);
+    return await sendSms("Lead", "lead@example.com", phone, message);
+}
+
+export async function handleIncomingSms({ body }) {
+    try {
+        console.log("Handling incoming SMS with body:", JSON.stringify(body));
+        const messageFrom = body.From;
+        const messageBody = body.Body ? body.Body.trim().toLowerCase() : null;
+
+        if (!messageBody) {
+            throw new Error("Message body is undefined or empty");
+        }
+
+        console.log("Message From:", messageFrom);
+        console.log("Message Body:", messageBody);
+
+        // If SMS is from the client
+        if (messageFrom === clientPhoneNumber) {
+            console.log("SMS is from client");
+
+            // Find the first lead with status 'new' that needs follow-up
+            const lead = await wixData.query('Leads')
+                .eq('status', 'new') // Only check leads with status 'new'
+                .find();
+
+            if (lead.items.length > 0) {
+                const leadDetails = lead.items[0];
+
+                if (messageBody === 'y') {
+                    console.log("Client confirmed they called the lead. Updating status to 'contacted'.");
+                    leadDetails.status = 'contacted';
+                    await wixData.update('Leads', leadDetails);
+                } else if (messageBody === 'n') {
+                    console.log("Client hasn't called the lead. Asking lead if they're interested.");
+                    const leadSms = `Are you still interested in the offer? Y/N`;
+                    await sendSmsToLead(leadDetails.number, leadSms);
+                }
+            } else {
+                console.log('No new leads found for follow-up.');
+            }
+        } else {
+            // Assume the SMS is from a lead
+            console.log("SMS is from lead");
+            const lead = await wixData.query('Leads').eq('number', messageFrom).find();
+
+            if (lead.items.length > 0) {
+                const leadDetails = lead.items[0];
+
+                if (messageBody === 'y') {
+                    console.log("Lead is still interested. Updating status to 'interested'. Notifying client.");
+                    leadDetails.status = 'interested';
+                    await wixData.update('Leads', leadDetails);
+                    await notifyClientLeadInterested(messageFrom);
+
+                } else if (messageBody === 'n') {
+                    console.log("Lead is no longer interested. Updating status to 'NO'.");
+                    leadDetails.status = 'NO';
+                    await wixData.update('Leads', leadDetails);
+                }
+            } else {
+                console.log('No lead found with the given phone number.');
+            }
+        }
+
+        return { status: 200, body: "Message processed successfully" };
+    } catch (error) {
+        console.error("Error in handleIncomingSms:", error);
+        throw error;
+    }
+}
+
+async function notifyClientLeadInterested(phone) {
+    const lead = await wixData.query('Leads').eq('number', phone).find();
+    if (lead.items.length > 0) {
+        const leadDetails = lead.items[0];
+        const clientSms = `Your lead ${leadDetails.title}, ${leadDetails.number} is still interested. Give them a call!`;
+        await sendSmsToClient(clientPhoneNumber, clientSms);
+    }
+}
